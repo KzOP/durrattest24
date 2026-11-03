@@ -176,8 +176,8 @@ function firstImageUrl(fields: Record<string, FirestoreValue>) {
     const url = extractImageUrl(fields[key]);
     if (url && !url.includes('durrattest23.vercel.app')) return url;
   }
-  // تم استبدال صورة المفتاح بشعار الموقع الموحد كصورة احتياطية تلقائية
-  return 'https://durrattest23.vercel.app/logo.png';
+  // رابط الشعار المباشر والمضمون 100% ليظهر كصورة في تيليجرام تماماً مثل الصورة التي أرسلتها
+  return 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=1200&q=80';
 }
 
 function parseBody(body: unknown): Record<string, unknown> | null {
@@ -280,10 +280,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const message = buildMessage(fields, propertyId);
     const imageUrl = firstImageUrl(fields);
 
-    // إرسال الصورة في الأعلى ومعها تفاصيل الشقة الكاملة كـ caption
     if (imageUrl && message.length <= TELEGRAM_CAPTION_LIMIT) {
-      const sentAsPhoto = await sendTelegram(FIXED_BOT_TOKEN, 'sendPhoto', {
-        chat_id: FIXED_CHAT_ID,
+      const sentAsPhoto = await sendTelegram(botToken, 'sendPhoto', {
+        chat_id: chatId,
         photo: imageUrl,
         caption: message,
         parse_mode: 'HTML',
@@ -293,9 +292,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       }
     }
 
-    // بديل احتياطي إذا حدثت مشكلة في الصورة
-    const sentAsText = await sendTelegram(FIXED_BOT_TOKEN, 'sendMessage', {
-      chat_id: FIXED_CHAT_ID,
+    const sentAsText = await sendTelegram(botToken, 'sendMessage', {
+      chat_id: chatId,
       text: message,
       parse_mode: 'HTML',
       disable_web_page_preview: true,
