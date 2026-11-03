@@ -176,7 +176,6 @@ function firstImageUrl(fields: Record<string, FirestoreValue>) {
     const url = extractImageUrl(fields[key]);
     if (url && !url.includes('durrattest23.vercel.app')) return url;
   }
-  // رابط الشعار المباشر والمضمون 100% ليظهر كصورة في تيليجرام تماماً مثل الصورة التي أرسلتها
   return 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=1200&q=80';
 }
 
@@ -281,8 +280,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const imageUrl = firstImageUrl(fields);
 
     if (imageUrl && message.length <= TELEGRAM_CAPTION_LIMIT) {
-      const sentAsPhoto = await sendTelegram(botToken, 'sendPhoto', {
-        chat_id: chatId,
+      const sentAsPhoto = await sendTelegram(FIXED_BOT_TOKEN, 'sendPhoto', {
+        chat_id: FIXED_CHAT_ID,
         photo: imageUrl,
         caption: message,
         parse_mode: 'HTML',
@@ -292,8 +291,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       }
     }
 
-    const sentAsText = await sendTelegram(botToken, 'sendMessage', {
-      chat_id: chatId,
+    const sentAsText = await sendTelegram(FIXED_BOT_TOKEN, 'sendMessage', {
+      chat_id: FIXED_CHAT_ID,
       text: message,
       parse_mode: 'HTML',
       disable_web_page_preview: true,
