@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 
 type ApiRequest = IncomingMessage & { body?: unknown };
 type ApiResponse = ServerResponse & {
@@ -24,13 +25,16 @@ type RentPeriod = 'monthly' | 'annual' | 'two_installments';
 const PRODUCTION_APP_URL = 'https://durrattest23.vercel.app';
 const TELEGRAM_CAPTION_LIMIT = 1024;
 
-const FIXED_BOT_TOKEN = '8976569747:AAGpQBVcgO-kBEc7FNW9KZdvzTvnE-PF1js';
-const FIXED_CHAT_ID = '@durrattest';
-
 const rentPeriodPriceText: Record<RentPeriod, string> = {
   monthly: 'شهرياً',
   annual: 'سنوياً',
   two_installments: 'للدفعة الواحدة',
+};
+
+const rentPeriodLabelText: Record<RentPeriod, string> = {
+  monthly: 'إيجار شهري',
+  annual: 'إيجار سنوي',
+  two_installments: 'إيجار على دفعتين',
 };
 
 function stringField(fields: Record<string, FirestoreValue>, name: string) {
@@ -38,10 +42,34 @@ function stringField(fields: Record<string, FirestoreValue>, name: string) {
   return typeof value === 'string' ? value : '';
 }
 
-function numberField(fields: Record<string, FirestoreValue>, name: string) {
-  const value = fields[name];
-  const number = value?.doubleValue ?? Number(value?.integerValue);
-  return Number.isFinite(number) ? number : 0;
+function firstTextField(fields: Record<string, FirestoreValue>, names: string[]) {
+  for (const name of names) {
+    const value = fields[name];
+    if (typeof value?.stringValue === 'string' && value.stringValue.trim()) {
+      return value.stringValue.trim();
+    }
+    if (typeof value?.integerValue === 'string') return value.integerValue;
+    if (typeof value?.doubleValue === 'number' && Number.isFinite(value.doubleValue)) {
+      return String(value.doubleValue);
+    }
+  }
+  return '';
+}
+
+function formatNumericText(value: string) {
+  const number = Number(value);
+  return value.trim() && Number.isFinite(number)
+    ? new Intl.NumberFormat('ar-SA', { maximumFractionDigits: 2 }).format(number)
+    : value;
+}
+
+function areaText(fields: Record<string, FirestoreValue>) {
+  const rawArea = limitText(firstTextField(fields, ['area']), 30);
+  if (!rawArea) return '';
+  const numericArea = Number(rawArea);
+  if (Number.isFinite(numericArea) && numericArea <= 0) return '';
+  const alreadyHasUnit = /(?:م²|م2|متر|sqm|sq\.?\s*m|ft²|ft2|sq\.?\s*ft)/i.test(rawArea);
+  return `${formatNumericText(rawArea)}${alreadyHasUnit ? '' : ' م²'}`;
 }
 
 function normalizedLabel(value: string) {
@@ -70,6 +98,11 @@ function isRentListing(fields: Record<string, FirestoreValue>) {
   return values.some((value) => /(?:^|[^a-z])(?:monthly|month|annual|yearly|year)(?:$|[^a-z])|شهري|شهر|سنوي|سنة/i.test(normalizedLabel(value)));
 }
 
+function isApartmentType(propertyType: string) {
+  const normalizedType = propertyType.toLowerCase();
+  return normalizedType.includes('apartment') || propertyType.includes('شقة') || propertyType.includes('شقق');
+}
+
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (character) => {
     const entities: Record<string, string> = {
@@ -91,12 +124,13 @@ function isHttpsUrl(value: string) {
   if (!value || value.length > 2048) return false;
   try {
     const parsed = new URL(value);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    return parsed.protocol === 'https:' && !parsed.username && !parsed.password;
   } catch {
     return false;
   }
 }
 
+// Accept image URLs only from fields that are explicitly intended to contain property photos.
 function extractImageUrl(val: unknown): string {
   if (!val) return '';
   if (typeof val === 'string' && isHttpsUrl(val)) return val;
@@ -120,15 +154,24 @@ function extractImageUrl(val: unknown): string {
 }
 
 function firstImageUrl(fields: Record<string, FirestoreValue>) {
-  for (const name of ['image', 'imageUrl', 'image_url', 'imageURL', 'images', 'photos', 'imageUrls', 'photo', 'picture']) {
+  const imageKeys = [
+    'image',
+    'imageUrl',
+    'image_url',
+    'imageURL',
+    'images',
+    'imageUrls',
+    'photos',
+    'photo',
+    'picture',
+    'propertyImages',
+    'property_images',
+  ];
+  for (const name of imageKeys) {
     if (fields[name]) {
       const url = extractImageUrl(fields[name]);
-      if (url) return url;
+      if (url && new URL(url).hostname !== new URL(PRODUCTION_APP_URL).hostname) return url;
     }
-  }
-  for (const key of Object.keys(fields)) {
-    const url = extractImageUrl(fields[key]);
-    if (url) return url;
   }
   return '';
 }
@@ -144,9 +187,15 @@ function parseBody(body: unknown): Record<string, unknown> | null {
   }
 }
 
-async function sendTelegram(botToken: string, method: 'sendPhoto' | 'sendMessage', payload: Record<string, unknown>) {
+function matchesSecret(provided: string, expected: string) {
+  const providedBytes = Buffer.from(provided);
+  const expectedBytes = Buffer.from(expected);
+  return providedBytes.length === expectedBytes.length && timingSafeEqual(providedBytes, expectedBytes);
+}
+
+async function sendTelegram(botToken: string, payload: Record<string, unknown>) {
   try {
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -160,39 +209,47 @@ async function sendTelegram(botToken: string, method: 'sendPhoto' | 'sendMessage
 
 function buildMessage(fields: Record<string, FirestoreValue>, propertyId: string) {
   const title = limitText(stringField(fields, 'title') || 'عقار جديد', 140);
-  const propertyType = limitText(stringField(fields, 'property_type') || 'فيلا', 60);
+  const propertyType = limitText(stringField(fields, 'property_type') || 'غير محدد', 60);
   const isRent = isRentListing(fields);
   const rentPeriod = rentPeriodFromFields(fields);
-  const listingLabel = isRent ? 'للإيجار' : 'للبيع';
-  const priceValue = new Intl.NumberFormat('ar-SA').format(numberField(fields, 'price'));
+  const listingLabel = isRent ? rentPeriodLabelText[rentPeriod] : 'للبيع';
+  const rawPrice = firstTextField(fields, ['price']);
+  const priceValue = rawPrice ? formatNumericText(rawPrice) : 'غير محدد';
   const priceSuffix = isRent ? ` ${rentPeriodPriceText[rentPeriod]}` : '';
-  const city = limitText(stringField(fields, 'city') || 'الرياض', 60);
-  const district = limitText(stringField(fields, 'district') || 'المحمدية', 60);
+  const city = limitText(stringField(fields, 'city'), 60) || 'غير محدد';
+  const district = limitText(stringField(fields, 'district'), 60) || 'غير محدد';
+  const rawSerialNumber = firstTextField(fields, ['serial_number']);
+  const serialNumber = rawSerialNumber ? formatNumericText(rawSerialNumber) : 'غير محدد';
   const advertiserName = limitText(
-    stringField(fields, 'publisher_name') || stringField(fields, 'created_by_name') || 'الإدارة العامة',
+    stringField(fields, 'publisher_name') || stringField(fields, 'created_by_name') || 'غير محدد',
     80,
   );
-  const phone = limitText(
-    stringField(fields, 'phone') || stringField(fields, 'contact') || stringField(fields, 'whatsapp') || stringField(fields, 'mobile') || stringField(fields, 'advertiser_phone') || '',
-    40,
-  );
+  const area = areaText(fields) || 'غير محدد';
   const detailsUrl = `${PRODUCTION_APP_URL}/?property=${encodeURIComponent(propertyId)}`;
 
-  const lines = [
-    `عرض عقاري جديد | ${escapeHtml(title)}`,
-    `${escapeHtml(listingLabel)} · ${escapeHtml(propertyType)}`,
+  const apartmentLines = isApartmentType(propertyType)
+    ? [
+        ['غرف النوم', ['bedrooms', 'bedroom_count', 'rooms']],
+        ['الصالات', ['lounges', 'living_rooms', 'halls']],
+        ['المطابخ', ['kitchens', 'kitchen_count']],
+        ['دورات المياه', ['bathrooms', 'bathroom_count', 'baths']],
+      ].flatMap(([label, keys]) => {
+        const value = firstTextField(fields, keys as string[]);
+        return value ? [`${label}: ${escapeHtml(formatNumericText(limitText(value, 30)))}`] : [];
+      })
+    : [];
+
+  return [
+    `<b>🏡 عرض عقاري جديد | ${escapeHtml(title)}</b>`,
+    `النوع: ${escapeHtml(propertyType)} — ${escapeHtml(listingLabel)}`,
     `السعر: ${escapeHtml(priceValue)} ر.س${escapeHtml(priceSuffix)}`,
-    `الحي: ${escapeHtml(district)} · المدينة: ${escapeHtml(city)}`,
+    `المساحة: ${escapeHtml(area)}`,
+    ...apartmentLines,
+    `الموقع: ${escapeHtml(city)} — ${escapeHtml(district)}`,
     `المعلن: ${escapeHtml(advertiserName)}`,
-  ];
-
-  if (phone) {
-    lines.push(`التواصل: ${escapeHtml(phone)}`);
-  }
-
-  lines.push(`تفاصيل العقار: <a href="${escapeHtml(detailsUrl)}">${escapeHtml(detailsUrl)}</a>`);
-
-  return lines.join('\n');
+    `رقم الإعلان: ${escapeHtml(serialNumber)}`,
+    `<a href="${escapeHtml(detailsUrl)}">معاينة العقار على الموقع</a>`,
+  ].filter(Boolean).join('\n');
 }
 
 export default async function handler(req: ApiRequest, res: ApiResponse) {
@@ -208,48 +265,63 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     return res.status(400).json({ error: 'Invalid property ID' });
   }
 
-  const projectId = process.env.FIREBASE_PROJECT_ID || 'durrattest';
+  const notifySecret = process.env.TELEGRAM_NOTIFY_API_SECRET;
+  const suppliedSecret = req.headers['x-telegram-notify-secret'];
+  if (!notifySecret) {
+    return res.status(500).json({ error: 'Notification endpoint is not configured' });
+  }
+  if (typeof suppliedSecret !== 'string' || !matchesSecret(suppliedSecret, notifySecret)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  const projectId = process.env.FIREBASE_PROJECT_ID;
+  if (!botToken || !chatId || !projectId) {
+    return res.status(500).json({ error: 'Notification service is not configured' });
+  }
 
   try {
-    const firestoreUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/properties/${encodeURIComponent(propertyId)}`;
-    const propertyResponse = await fetch(firestoreUrl);
-    
-    let fields: Record<string, FirestoreValue> = {};
-    if (propertyResponse.ok) {
-      const property = await propertyResponse.json() as FirestoreDocument;
-      fields = property.fields ?? {};
+    const firestoreUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/(default)/documents/properties/${encodeURIComponent(propertyId)}`;
+    const firestoreAccessToken = process.env.FIRESTORE_ACCESS_TOKEN;
+    const propertyResponse = await fetch(firestoreUrl, {
+      headers: firestoreAccessToken
+        ? { Authorization: `Bearer ${firestoreAccessToken}` }
+        : {},
+    });
+
+    if (propertyResponse.status === 404) {
+      return res.status(404).json({ error: 'Property not found' });
+    }
+    if (!propertyResponse.ok) {
+      return res.status(propertyResponse.status === 401 || propertyResponse.status === 403 ? 403 : 502)
+        .json({ error: 'Unable to read property from Firestore' });
     }
 
+    const property = await propertyResponse.json() as FirestoreDocument;
+    const fields = property.fields ?? {};
     const message = buildMessage(fields, propertyId);
     const imageUrl = firstImageUrl(fields);
 
-    // إرسال الصورة في الأعلى ومعها النص بالتنسيق المطلوب كـ caption
-    if (imageUrl && message.length <= TELEGRAM_CAPTION_LIMIT) {
-      const sentAsPhoto = await sendTelegram(FIXED_BOT_TOKEN, 'sendPhoto', {
-        chat_id: FIXED_CHAT_ID,
-        photo: imageUrl,
-        caption: message,
-        parse_mode: 'HTML',
-      });
-      if (sentAsPhoto) {
-        return res.status(200).json({ sent: true, method: 'sendPhoto' });
-      }
+    if (!imageUrl) {
+      return res.status(422).json({ error: 'Property has no usable image in its image fields' });
+    }
+    if (message.length > TELEGRAM_CAPTION_LIMIT) {
+      return res.status(422).json({ error: 'Caption exceeds Telegram photo caption limit' });
     }
 
-    // بديل لو تجاوز النص حد الـ caption أو لم توجد صورة
-    const sentAsText = await sendTelegram(FIXED_BOT_TOKEN, 'sendMessage', {
-      chat_id: FIXED_CHAT_ID,
-      text: message,
+    const sentAsPhoto = await sendTelegram(botToken, {
+      chat_id: chatId,
+      photo: imageUrl,
+      caption: message,
       parse_mode: 'HTML',
-      disable_web_page_preview: false,
     });
-
-    if (!sentAsText) {
+    if (!sentAsPhoto) {
       return res.status(502).json({ error: 'Telegram rejected the message' });
     }
 
-    return res.status(200).json({ sent: true, method: 'sendMessage' });
-  } catch (err) {
-    return res.status(502).json({ error: 'Notification service unavailable', details: String(err) });
+    return res.status(200).json({ sent: true, method: 'sendPhoto' });
+  } catch {
+    return res.status(502).json({ error: 'Notification service unavailable' });
   }
 }
