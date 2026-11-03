@@ -132,36 +132,47 @@ function limitText(value: string, maxCharacters: number) {
 function isHttpsUrl(value: string) {
   if (!value || value.length > 2048) return false;
   try {
-    return new URL(value).protocol === 'https:';
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
   } catch {
     return false;
   }
 }
 
-function imageUrlFromValue(value?: FirestoreValue): string {
-  if (!value) return '';
-  const directValue = typeof value.stringValue === 'string' ? value.stringValue.trim() : '';
-  if (directValue && isHttpsUrl(directValue)) return directValue;
-  const nestedFields = value.mapValue?.fields;
-  if (!nestedFields) return '';
-  for (const key of ['url', 'imageUrl', 'image_url', 'src', 'downloadURL', 'downloadUrl']) {
-    const candidate = nestedFields[key];
-    const directCandidate = candidate?.stringValue?.trim() ?? '';
-    if (directCandidate && isHttpsUrl(directCandidate)) return directCandidate;
-    const nestedCandidate = imageUrlFromValue(candidate);
-    if (nestedCandidate) return nestedCandidate;
+// دالة محسنة لاستخراج رابط الصورة بشكل دقيق من أي حقل في الفايربيس
+function extractImageUrl(val: unknown): string {
+  if (!val) return '';
+  if (typeof val === 'string' && isHttpsUrl(val)) return val;
+  if (typeof val === 'object' && val !== null) {
+    const v = val as FirestoreValue;
+    if (v.stringValue && isHttpsUrl(v.stringValue)) return v.stringValue;
+    if (v.arrayValue?.values) {
+      for (const item of v.arrayValue.values) {
+        const found = extractImageUrl(item);
+        if (found) return found;
+      }
+    }
+    if (v.mapValue?.fields) {
+      for (const key of Object.keys(v.mapValue.fields)) {
+        const found = extractImageUrl(v.mapValue.fields[key]);
+        if (found) return found;
+      }
+    }
   }
   return '';
 }
 
 function firstImageUrl(fields: Record<string, FirestoreValue>) {
-  for (const name of ['imageUrl', 'image_url', 'imageURL', 'images', 'photos', 'imageUrls', 'photo']) {
-    const value = fields[name];
-    const candidates = value?.arrayValue?.values ?? (value ? [value] : [value]);
-    for (const candidate of candidates) {
-      const imageUrl = imageUrlFromValue(candidate);
-      if (imageUrl) return imageUrl;
+  for (const name of ['image', 'imageUrl', 'image_url', 'imageURL', 'images', 'photos', 'imageUrls', 'photo', 'picture']) {
+    if (fields[name]) {
+      const url = extractImageUrl(fields[name]);
+      if (url) return url;
     }
+  }
+  // فحص شامل لكل الحقول بحثاً عن أي رابط صورة
+  for (const key of Object.keys(fields)) {
+    const url = extractImageUrl(fields[key]);
+    if (url) return url;
   }
   return '';
 }
@@ -253,11 +264,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     return res.status(400).json({ error: 'Invalid property ID' });
   }
 
-  // استخدام معرف المشروع المباشر لتجنب أي فشل بيئي
   const projectId = process.env.FIREBASE_PROJECT_ID || 'durrattest';
 
   try {
-    // جلب بيانات العقار مباشرة بدون شروط موظف معقدة تسبب الرفض
     const firestoreUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/properties/${encodeURIComponent(propertyId)}`;
     const propertyResponse = await fetch(firestoreUrl);
     
@@ -270,16 +279,20 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const message = buildMessage(fields, propertyId);
     const imageUrl = firstImageUrl(fields);
 
-    if (imageUrl && message.length <= TELEGRAM_CAPTION_LIMIT) {
+    // إذا وُجدت الصورة، يتم إرسالها كصورة مع النص كـ caption
+    if (imageUrl) {
       const sentAsPhoto = await sendTelegram(FIXED_BOT_TOKEN, 'sendPhoto', {
         chat_id: FIXED_CHAT_ID,
         photo: imageUrl,
         caption: message,
         parse_mode: 'HTML',
       });
-      if (sentAsPhoto) return res.status(200).json({ sent: true, method: 'sendPhoto' });
+      if (sentAsPhoto) {
+        return res.status(200).json({ sent: true, method: 'sendPhoto' });
+      }
     }
 
+    // احتياطاً: لو لم تتوفر صورة يتم الإرسال كنص عادي
     const sentAsText = await sendTelegram(FIXED_BOT_TOKEN, 'sendMessage', {
       chat_id: FIXED_CHAT_ID,
       text: message,
