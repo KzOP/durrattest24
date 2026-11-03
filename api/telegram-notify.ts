@@ -22,8 +22,6 @@ type FirestoreDocument = {
 type RentPeriod = 'monthly' | 'annual' | 'two_installments';
 
 const PRODUCTION_APP_URL = 'https://durrattest23.vercel.app';
-const TELEGRAM_CAPTION_LIMIT = 1024;
-
 const FIXED_BOT_TOKEN = '8976569747:AAGpQBVcgO-kBEc7FNW9KZdvzTvnE-PF1js';
 const FIXED_CHAT_ID = '@durrattest';
 
@@ -128,57 +126,6 @@ function limitText(value: string, maxCharacters: number) {
   return Array.from(value.trim()).slice(0, maxCharacters).join('');
 }
 
-function isHttpsUrl(value: string) {
-  if (!value || value.length > 2048) return false;
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
-  } catch {
-    return false;
-  }
-}
-
-function extractImageUrl(val: unknown): string {
-  if (!val) return '';
-  if (typeof val === 'string' && isHttpsUrl(val)) return val;
-  if (typeof val === 'object' && val !== null) {
-    const v = val as FirestoreValue;
-    if (v.stringValue && isHttpsUrl(v.stringValue)) return v.stringValue;
-    if (v.arrayValue?.values) {
-      for (const item of v.arrayValue.values) {
-        const found = extractImageUrl(item);
-        if (found) return found;
-      }
-    }
-    if (v.mapValue?.fields) {
-      for (const key of Object.keys(v.mapValue.fields)) {
-        const found = extractImageUrl(v.mapValue.fields[key]);
-        if (found) return found;
-      }
-    }
-  }
-  return '';
-}
-
-function firstImageUrl(fields: Record<string, FirestoreValue>) {
-  const imageKeys = [
-    'image', 'imageUrl', 'image_url', 'imageURL', 
-    'images', 'photos', 'imageUrls', 'photo', 'picture',
-    'banner', 'thumbnail', 'media'
-  ];
-  for (const name of imageKeys) {
-    if (fields[name]) {
-      const url = extractImageUrl(fields[name]);
-      if (url && !url.includes('durrattest23.vercel.app')) return url;
-    }
-  }
-  for (const key of Object.keys(fields)) {
-    const url = extractImageUrl(fields[key]);
-    if (url && !url.includes('durrattest23.vercel.app')) return url;
-  }
-  return 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=1200&q=80';
-}
-
 function parseBody(body: unknown): Record<string, unknown> | null {
   try {
     const parsed = typeof body === 'string' ? JSON.parse(body) as unknown : body;
@@ -190,9 +137,9 @@ function parseBody(body: unknown): Record<string, unknown> | null {
   }
 }
 
-async function sendTelegram(botToken: string, method: 'sendPhoto' | 'sendMessage', payload: Record<string, unknown>) {
+async function sendTelegram(botToken: string, payload: Record<string, unknown>) {
   try {
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -234,8 +181,9 @@ function buildMessage(fields: Record<string, FirestoreValue>, propertyId: string
       })
     : [];
 
+  // كتابة الرابط بشكل نصي صريح في نهاية الرسالة لكي يتمكن تيليجرام من توليد المعاينة (Preview) تلقائياً
   return [
-    `<b>🏡 عرض عقاري جديد | ${escapeHtml(title)}</b>`,
+    `عرض عقاري جديد | ${escapeHtml(title)}`,
     `النوع: ${escapeHtml(propertyType)} — ${escapeHtml(listingLabel)}`,
     `السعر: ${escapeHtml(priceValue)} ر.س${escapeHtml(priceSuffix)}`,
     area ? `المساحة: ${escapeHtml(area)}` : '',
@@ -245,9 +193,9 @@ function buildMessage(fields: Record<string, FirestoreValue>, propertyId: string
       : '',
     `المعلن: ${escapeHtml(advertiserName)}`,
     serialNumber
-      ? `رقم الإعلان: ${new Intl.NumberFormat('ar-SA').format(serialNumber)}`
+      ? `رقم الإعلان: ${new Intl.NumberFormat('ar-SA', { useGrouping: false }).format(serialNumber)}`
       : '',
-    `<a href="${escapeHtml(detailsUrl)}">معاينة العقار على الموقع</a>`,
+    `تفاصيل العقار: ${detailsUrl}`,
   ].filter(Boolean).join('\n');
 }
 
@@ -277,28 +225,15 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     }
 
     const message = buildMessage(fields, propertyId);
-    const imageUrl = firstImageUrl(fields);
 
-    if (imageUrl && message.length <= TELEGRAM_CAPTION_LIMIT) {
-      const sentAsPhoto = await sendTelegram(FIXED_BOT_TOKEN, 'sendPhoto', {
-        chat_id: FIXED_CHAT_ID,
-        photo: imageUrl,
-        caption: message,
-        parse_mode: 'HTML',
-      });
-      if (sentAsPhoto) {
-        return res.status(200).json({ sent: true, method: 'sendPhoto' });
-      }
-    }
-
-    const sentAsText = await sendTelegram(FIXED_BOT_TOKEN, 'sendMessage', {
+    // إرسال رسالة نصية مع السماح لمعاينة الرابط (Preview) بالظهور تلقائياً لتظهر صورة الموقع في الأسفل
+    const sent = await sendTelegram(FIXED_BOT_TOKEN, {
       chat_id: FIXED_CHAT_ID,
       text: message,
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
+      disable_web_page_preview: false, 
     });
 
-    if (!sentAsText) {
+    if (!sent) {
       return res.status(502).json({ error: 'Telegram rejected the message' });
     }
 
