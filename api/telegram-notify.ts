@@ -176,8 +176,8 @@ function firstImageUrl(fields: Record<string, FirestoreValue>) {
     const url = extractImageUrl(fields[key]);
     if (url && !url.includes('durrattest23.vercel.app')) return url;
   }
-  // صورة افتراضية للعقار في حال لم يتم رفع صورة لضمان عدم فشل الإرسال أبداً
-  return 'https://images.unsplash.com/photo-1560518883-ce09059eeffa';
+  // في حال لم يرفع المستخدم صورة للعقار، يتم استخدام شعار الموقع الرسمي كصورة بديلة
+  return `${PRODUCTION_APP_URL}/logo.png`;
 }
 
 function parseBody(body: unknown): Record<string, unknown> | null {
@@ -280,7 +280,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const message = buildMessage(fields, propertyId);
     const imageUrl = firstImageUrl(fields);
 
-    // إرسال الصورة في الأعلى ومعها تفاصيل الشقة الكاملة كـ caption
     if (imageUrl && message.length <= TELEGRAM_CAPTION_LIMIT) {
       const sentAsPhoto = await sendTelegram(FIXED_BOT_TOKEN, 'sendPhoto', {
         chat_id: FIXED_CHAT_ID,
@@ -293,7 +292,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       }
     }
 
-    // بديل احتياطي إذا حدثت مشكلة في الصورة
     const sentAsText = await sendTelegram(FIXED_BOT_TOKEN, 'sendMessage', {
       chat_id: FIXED_CHAT_ID,
       text: message,
