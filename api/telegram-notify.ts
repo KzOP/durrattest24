@@ -26,6 +26,10 @@ const PRODUCTION_APP_URL = 'https://durrattest23.vercel.app';
 const TELEGRAM_CAPTION_LIMIT = 1024;
 const TELEGRAM_TEXT_LIMIT = 4096;
 
+// تم وضع التوكن والشات آيدي مباشرة هنا لتجاوز مشاكل Vercel نهائياً
+const FIXED_BOT_TOKEN = '8976569747:AAGpQBVcgO-kBEc7FNW9KZdvzTvnE-PF1js';
+const FIXED_CHAT_ID = '@durrattest';
+
 const rentPeriodPriceText: Record<RentPeriod, string> = {
   monthly: 'شهرياً',
   annual: 'سنوياً',
@@ -254,8 +258,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
   const apiKey = process.env.VITE_FIREBASE_API_KEY;
   const projectId = process.env.FIREBASE_PROJECT_ID;
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
+  
+  // استخدام القيم الثابتة مباشرة لتجنب فشل متغيرات البيئة في Vercel
+  const botToken = FIXED_BOT_TOKEN;
+  const chatId = FIXED_CHAT_ID;
+
   if (!apiKey || !projectId || !botToken || !chatId) {
     return res.status(500).json({ error: 'Server notification settings are incomplete' });
   }
