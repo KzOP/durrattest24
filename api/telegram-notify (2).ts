@@ -2,13 +2,13 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {
-    return res.status(405.json({ error: 'Method not allowed' }));
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
     const { propertyId } = req.body;
     
-    // القيم مباشرة هنا عشان نتجنب مشاكل قراءة البيئة في Vercel
+    // التوكن والشات آيدي مثبتة هنا مباشرة لضمان العمل بدون مشاكل في البيئة
     const botToken = '8976569747:AAGpQBVcgO-kBEc7FNW9KZdvzTvnE-PF1js';
     const chatId = '@durrattest';
 
