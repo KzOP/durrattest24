@@ -33,15 +33,51 @@ const rentPeriodPriceText: Record<RentPeriod, string> = {
   two_installments: 'للدفعة الواحدة',
 };
 
+const rentPeriodLabelText: Record<RentPeriod, string> = {
+  monthly: 'إيجار شهري',
+  annual: 'إيجار سنوي',
+  two_installments: 'إيجار على دفعتين',
+};
+
 function stringField(fields: Record<string, FirestoreValue>, name: string) {
   const value = fields[name]?.stringValue;
   return typeof value === 'string' ? value : '';
+}
+
+function firstTextField(fields: Record<string, FirestoreValue>, names: string[]) {
+  for (const name of names) {
+    const value = fields[name];
+    if (typeof value?.stringValue === 'string' && value.stringValue.trim()) {
+      return value.stringValue.trim();
+    }
+    if (typeof value?.integerValue === 'string') return value.integerValue;
+    if (typeof value?.doubleValue === 'number' && Number.isFinite(value.doubleValue)) {
+      return String(value.doubleValue);
+    }
+  }
+  return '';
 }
 
 function numberField(fields: Record<string, FirestoreValue>, name: string) {
   const value = fields[name];
   const number = value?.doubleValue ?? Number(value?.integerValue);
   return Number.isFinite(number) ? number : 0;
+}
+
+function formatNumericText(value: string) {
+  const number = Number(value);
+  return value.trim() && Number.isFinite(number)
+    ? new Intl.NumberFormat('ar-SA', { maximumFractionDigits: 2 }).format(number)
+    : value;
+}
+
+function areaText(fields: Record<string, FirestoreValue>) {
+  const rawArea = limitText(firstTextField(fields, ['area']), 30);
+  if (!rawArea) return '';
+  const numericArea = Number(rawArea);
+  if (Number.isFinite(numericArea) && numericArea <= 0) return '';
+  const alreadyHasUnit = /(?:م²|م2|متر|sqm|sq\.?\s*m|ft²|ft2|sq\.?\s*ft)/i.test(rawArea);
+  return `${formatNumericText(rawArea)}${alreadyHasUnit ? '' : ' م²'}`;
 }
 
 function normalizedLabel(value: string) {
@@ -68,6 +104,11 @@ function isRentListing(fields: Record<string, FirestoreValue>) {
   const recognized = values.find((value) => isRentLabel(value) || isSaleLabel(value));
   if (recognized) return isRentLabel(recognized);
   return values.some((value) => /(?:^|[^a-z])(?:monthly|month|annual|yearly|year)(?:$|[^a-z])|شهري|شهر|سنوي|سنة/i.test(normalizedLabel(value)));
+}
+
+function isApartmentType(propertyType: string) {
+  const normalizedType = propertyType.toLowerCase();
+  return normalizedType.includes('apartment') || propertyType.includes('شقة') || propertyType.includes('شقق');
 }
 
 function escapeHtml(value: string) {
@@ -160,39 +201,49 @@ async function sendTelegram(botToken: string, method: 'sendPhoto' | 'sendMessage
 
 function buildMessage(fields: Record<string, FirestoreValue>, propertyId: string) {
   const title = limitText(stringField(fields, 'title') || 'عقار جديد', 140);
-  const propertyType = limitText(stringField(fields, 'property_type') || 'فيلا', 60);
+  const propertyType = limitText(stringField(fields, 'property_type') || 'غير محدد', 60);
   const isRent = isRentListing(fields);
   const rentPeriod = rentPeriodFromFields(fields);
-  const listingLabel = isRent ? 'للإيجار' : 'للبيع';
+  const listingLabel = isRent ? rentPeriodLabelText[rentPeriod] : 'للبيع';
   const priceValue = new Intl.NumberFormat('ar-SA').format(numberField(fields, 'price'));
   const priceSuffix = isRent ? ` ${rentPeriodPriceText[rentPeriod]}` : '';
-  const city = limitText(stringField(fields, 'city') || 'الرياض', 60);
-  const district = limitText(stringField(fields, 'district') || 'المحمدية', 60);
+  const city = limitText(stringField(fields, 'city'), 60);
+  const district = limitText(stringField(fields, 'district'), 60);
+  const serialNumber = numberField(fields, 'serial_number');
   const advertiserName = limitText(
-    stringField(fields, 'publisher_name') || stringField(fields, 'created_by_name') || 'الإدارة العامة',
+    stringField(fields, 'publisher_name') || stringField(fields, 'created_by_name') || 'غير محدد',
     80,
   );
-  const phone = limitText(
-    stringField(fields, 'phone') || stringField(fields, 'contact') || stringField(fields, 'whatsapp') || stringField(fields, 'mobile') || stringField(fields, 'advertiser_phone') || '',
-    40,
-  );
+  const area = areaText(fields);
   const detailsUrl = `${PRODUCTION_APP_URL}/?property=${encodeURIComponent(propertyId)}`;
 
-  const lines = [
-    `عرض عقاري جديد | ${escapeHtml(title)}`,
-    `${escapeHtml(listingLabel)} · ${escapeHtml(propertyType)}`,
+  const apartmentLines = isApartmentType(propertyType)
+    ? [
+        ['غرف النوم', ['bedrooms', 'bedroom_count', 'rooms']],
+        ['الصالات', ['lounges', 'living_rooms', 'halls']],
+        ['المطابخ', ['kitchens', 'kitchen_count']],
+        ['دورات المياه', ['bathrooms', 'bathroom_count', 'baths']],
+      ].flatMap(([label, keys]) => {
+        const value = firstTextField(fields, keys as string[]);
+        return value ? [`${label}: ${escapeHtml(formatNumericText(limitText(value, 30)))}`] : [];
+      })
+    : [];
+
+  return [
+    `<b>🏡 عرض عقاري جديد | ${escapeHtml(title)}</b>`,
+    `النوع: ${escapeHtml(propertyType)} — ${escapeHtml(listingLabel)}`,
     `السعر: ${escapeHtml(priceValue)} ر.س${escapeHtml(priceSuffix)}`,
-    `الحي: ${escapeHtml(district)} · المدينة: ${escapeHtml(city)}`,
+    area ? `المساحة: ${escapeHtml(area)}` : '',
+    ...apartmentLines,
+    city || district
+      ? `الموقع: ${escapeHtml([city, district].filter(Boolean).join(' — '))}`
+      : '',
     `المعلن: ${escapeHtml(advertiserName)}`,
-  ];
-
-  if (phone) {
-    lines.push(`التواصل: ${escapeHtml(phone)}`);
-  }
-
-  lines.push(`تفاصيل العقار: <a href="${escapeHtml(detailsUrl)}">${escapeHtml(detailsUrl)}</a>`);
-
-  return lines.join('\n');
+    serialNumber
+      ? `رقم الإعلان: ${new Intl.NumberFormat('ar-SA').format(serialNumber)}`
+      : '',
+    `<a href="${escapeHtml(detailsUrl)}">معاينة العقار على الموقع</a>`,
+  ].filter(Boolean).join('\n');
 }
 
 export default async function handler(req: ApiRequest, res: ApiResponse) {
@@ -223,7 +274,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const message = buildMessage(fields, propertyId);
     const imageUrl = firstImageUrl(fields);
 
-    // إرسال الصورة في الأعلى ومعها النص بالتنسيق المطلوب كـ caption
     if (imageUrl && message.length <= TELEGRAM_CAPTION_LIMIT) {
       const sentAsPhoto = await sendTelegram(FIXED_BOT_TOKEN, 'sendPhoto', {
         chat_id: FIXED_CHAT_ID,
@@ -236,12 +286,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       }
     }
 
-    // بديل لو تجاوز النص حد الـ caption أو لم توجد صورة
     const sentAsText = await sendTelegram(FIXED_BOT_TOKEN, 'sendMessage', {
       chat_id: FIXED_CHAT_ID,
       text: message,
       parse_mode: 'HTML',
-      disable_web_page_preview: false,
+      disable_web_page_preview: true,
     });
 
     if (!sentAsText) {
